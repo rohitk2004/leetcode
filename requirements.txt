@@ -2,3 +2,4 @@ streamlit
 undetected-chromedriver
 selenium==4.20.0
 groq
+setuptools
