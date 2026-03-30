@@ -19,8 +19,8 @@ st.markdown("""
     .stButton>button { width: 100%; border-radius: 5px; height: 3em; font-weight: bold; }
     .stTextInput>div>div>input { border-radius: 5px; }
     .stTextArea>div>div>textarea { border-radius: 5px; }
-    .success-box { padding: 10px; background-color: #e8f5e9; border-left: 5px solid #2e7d32; color: #2e7d32; border-radius: 5px; }
-    .error-box { padding: 10px; background-color: #ffebee; border-left: 5px solid #c62828; color: #c62828; border-radius: 5px; }
+    .status-container { padding: 10px; background-color: #f0f2f6; border-radius: 10px; margin-bottom: 20px; border: 1px solid #ddd; }
+    .link-card { background: white; padding: 10px; border-radius: 5px; border-left: 5px solid #ff9800; margin-bottom: 10px; box-shadow: 2px 2px 5px rgba(0,0,0,0.05); }
     </style>
     """, unsafe_allow_html=True)
 
@@ -37,20 +37,22 @@ def inject_number(text):
             result.append(target)
     return ' '.join(result)
 
-def run_bot_flow(email, password, titles, contents, status_placeholder):
+def run_bot_flow(email, password, titles, contents, status_placeholder, results_placeholder):
     # Inject number
     contents = [inject_number(c) for c in contents]
     
-    status_placeholder.info(f"🚀 Starting Chrome session...")
+    status_placeholder.info(f"🚀 Initializing Browser Session...")
     options = uc.ChromeOptions()
-    results = []
+    # options.add_argument("--headless") # Headless often gets detected, so we stay visible
+    
+    published_links = []
     
     try:
         driver = uc.Chrome(options=options, version_main=146)
         wait = WebDriverWait(driver, 25)
         
         # --- LOGIN PHASE ---
-        status_placeholder.info(f"🔑 Logging in as {email}...")
+        status_placeholder.info(f"🔑 Logging into LeetCode...")
         driver.delete_all_cookies()
         driver.get("https://leetcode.com/accounts/login/?next=%2Fdiscuss%2Fcreate%2F")
         
@@ -65,24 +67,22 @@ def run_bot_flow(email, password, titles, contents, status_placeholder):
             
             login_button = wait.until(EC.element_to_be_clickable((By.ID, "signin_btn")))
             login_button.click()
-        except Exception as e:
-            print(f"Login field error: {e}")
+        except: pass
 
-        status_placeholder.warning("⚠️ Solve Captcha in the Chrome window if prompted!")
+        status_placeholder.warning("🚦 Solve Captcha in the Chrome window if prompted! (You can minimize after login)")
         
         try:
-            # Increase wait for manual captcha (300s)
             WebDriverWait(driver, 300).until(lambda d: "discuss/create" in d.current_url)
-            status_placeholder.success("✅ Login Successful!")
+            status_placeholder.success("✅ Login Verified!")
         except:
             driver.quit()
-            return [], "Login failed or timed out (Captcha not solved)."
+            return "Login timed out."
 
         # --- POSTING PHASE ---
         for i in range(len(titles)):
             title = titles[i]
             content = contents[i]
-            status_placeholder.info(f"📝 Posting ({i+1}/{len(titles)}): {title}")
+            status_placeholder.info(f"⚡ Processing Post {i+1}/{len(titles)}: {title}")
             
             max_retries = 2
             success = False
@@ -94,20 +94,16 @@ def run_bot_flow(email, password, titles, contents, status_placeholder):
                 time.sleep(2)
                 
                 try:
-                    # Robust Title Locator
                     title_xpath = "//input[contains(translate(@placeholder, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'title')] | //div[contains(@class, 'title')]//input | //input[@type='text']"
                     title_in = wait.until(EC.presence_of_element_located((By.XPATH, title_xpath)))
                     title_in.clear()
                     title_in.send_keys(title)
                     
                     time.sleep(1)
-                    
-                    # Content Locator
                     try:
                         textarea = driver.find_element(By.XPATH, "//textarea")
                         textarea.send_keys(content)
                     except:
-                        # Fallback for complex editors
                         title_in.click()
                         actions = ActionChains(driver)
                         actions.send_keys("\t")
@@ -115,13 +111,10 @@ def run_bot_flow(email, password, titles, contents, status_placeholder):
                         actions.perform()
 
                     time.sleep(1)
-                    
-                    # Post Button Locator
                     post_xpath = "//button[contains(text(), 'Post') or contains(text(), 'Publish')] | //button[contains(@class, 'post-btn')] | //div[contains(@class, 'post-btn')]"
                     post_btn = wait.until(EC.element_to_be_clickable((By.XPATH, post_xpath)))
                     post_btn.click()
                     
-                    # Verification
                     redirected = False
                     for _ in range(15):
                         time.sleep(1)
@@ -130,145 +123,113 @@ def run_bot_flow(email, password, titles, contents, status_placeholder):
                             break
                     
                     if redirected:
-                        results.append(f"✅ Published: {driver.current_url}")
+                        cur_url = driver.current_url
+                        published_links.append(cur_url)
+                        
+                        # --- INSTANT UPDATE ---
+                        with results_placeholder:
+                            st.markdown(f'<div class="link-card">✅ <b>Post {len(published_links)} Published:</b><br><a href="{cur_url}" target="_blank">{cur_url}</a></div>', unsafe_allow_html=True)
+                        
                         success = True
                         break
                     else:
-                        print(f"Post failed on attempt {attempt+1}")
                         driver.refresh()
-                except Exception as e:
-                    print(f"Attempt {attempt+1} error: {e}")
+                except:
                     driver.refresh()
 
             if not success:
-                results.append(f"❌ Failed permanently: {title}")
+                with results_placeholder:
+                    st.error(f"❌ Failed permanently: {title}")
             
             if i < len(titles) - 1:
                 time.sleep(5)
 
         driver.quit()
-        return results, None
+        status_placeholder.success("🏁 All scheduled posts are finished!")
+        return None
 
     except Exception as e:
         import traceback
         full_err = traceback.format_exc()
         if "no such window" in str(e).lower() or "target window already closed" in str(e).lower():
-            return [], "❌ The Chrome window was closed manually. Please start again and keep the automation window open."
-            
+            return "❌ Chrome window was closed prematurely."
         if 'driver' in locals(): 
             try: driver.quit()
             except: pass
-        print(f"DEBUG ERROR:\n{full_err}")
-        # Show full detail in a text box
-        st.error(f"Critical Bot Error: {str(e)}")
-        with st.expander("Show detailed error logs"):
-            st.code(full_err)
-        return [], None
+        status_placeholder.error(f"Error: {e}")
+        with st.expander("Details"): st.code(full_err)
+        return str(e)
 
 # --- STREAMLIT UI ---
 
-st.title("🚀 LeetCode Batch Post Bot")
-st.markdown("Automate your LeetCode Discussion posts with Groq AI or manual content.")
+st.title("🚀 LeetCode Background Bot")
+st.markdown("Automate your posts. **Tip:** Minimize the Chrome window after solving Captcha to work on other things.")
 
-# Sidebar for Login
 with st.sidebar:
-    st.header("🔑 LeetCode Login")
-    user_email = st.text_input("LeetCode Email", placeholder="email@example.com")
+    st.header("🔑 Credentials")
+    user_email = st.text_input("LeetCode Email")
     user_pass = st.text_input("LeetCode Password", type="password")
-    groq_api_key = st.text_input("Groq API Key", placeholder="gsk_...", type="password")
+    groq_api_key = st.text_input("Groq API Key (If using AI)", type="password")
     st.divider()
-    st.warning("⚠️ **IMPORTANT:** Do NOT close the Chrome window that pops up. The bot needs it to stay open until all posts are finished.")
-    st.info("Note: Solve Captcha manually in the pop-up window if it appears.")
+    st.warning("⚠️ Keep the automation Chrome window alive! Do not close it.")
 
-tab1, tab2 = st.tabs(["✨ AI Auto-Post (Groq)", "📝 Manual Batch Post"])
+tab1, tab2 = st.tabs(["✨ AI Auto-Post", "📝 Manual Text"])
+
+# Containers for status and links
+main_status = st.container()
+links_container = st.container()
 
 with tab1:
-    st.header("Groq AI Content Generator")
-    groq_topic = st.text_area("What is the general topic?", "Python Advanced Interview Questions")
+    st.header("Groq Plain-Text Generator")
+    groq_topic = st.text_area("General Topic", "Tech Support")
+    groq_titles_input = st.text_area("Titles (One per line)")
+    num_posts = st.number_input("Max posts", 1, 10, 3)
     
-    col1, col2 = st.columns(2)
-    with col1:
-        groq_titles_input = st.text_area("Titles (One per line)", "Python Memory Management\nGIL in Python\nList Comprehensions")
-    with col2:
-        num_posts = st.number_input("Number of AI posts", min_value=1, max_value=10, value=3)
-    
-    if st.button("Generate & Publish with Groq"):
+    if st.button("Generate & Publish"):
         if not user_email or not user_pass or not groq_api_key:
-            st.error("Please provide LeetCode credentials AND Groq API Key.")
+            st.error("Missing credentials.")
         else:
-            status = st.empty()
             try:
                 client = Groq(api_key=groq_api_key)
                 titles_to_gen = groq_titles_input.split('\n')[:num_posts]
+                gen_titles, gen_contents = [], []
                 
-                gen_titles = []
-                gen_contents = []
-                
-                progress_bar = st.progress(0)
-                for idx, t_req in enumerate(titles_to_gen):
-                    status.info(f"🤖 Groq is writing: {t_req}...")
-                    # Explicitly tell AI not to use code blocks or technical code snippets
-                    prompt = (
-                        f"Write a detailed technical article for '{t_req}' related to '{groq_topic}'. "
-                        f"STRICT RULE: Do NOT include any code blocks, code snippets, or programming syntax. "
-                        f"Output only in simple, easy-to-read text. "
-                        f"Start directly with the content."
-                    )
+                with main_status:
+                    status_msg = st.empty()
+                    progress_bar = st.progress(0)
                     
-                    response = client.chat.completions.create(
-                        model="llama-3.3-70b-versatile",
-                        messages=[{"role": "user", "content": prompt}],
-                    )
-                    text = response.choices[0].message.content
-                    # Always use user's input title (t_req)
-                    gen_titles.append(t_req.strip())
-                    if "CONTENT:" in text:
-                        # Safety just in case AI still outputs it
-                        gen_contents.append(text.split("CONTENT:")[1].strip())
-                    else:
-                        gen_contents.append(text.strip())
-                    progress_bar.progress((idx + 1) / len(titles_to_gen))
-                
-                status.success("🤖 AI Generation Complete! Starting Bot Flow...")
-                urls, err = run_bot_flow(user_email, user_pass, gen_titles, gen_contents, status)
-                
-                if err:
-                    st.error(err)
-                for url in urls:
-                    st.write(url)
+                    for idx, t_req in enumerate(titles_to_gen):
+                        status_msg.info(f"🤖 AI is writing: {t_req}...")
+                        prompt = f"Write a detailed technical article for '{t_req}' related to '{groq_topic}'. No code blocks. Plain text only."
+                        resp = client.chat.completions.create(model="llama-3.3-70b-versatile", messages=[{"role": "user", "content": prompt}])
+                        gen_titles.append(t_req.strip())
+                        gen_contents.append(resp.choices[0].message.content.strip())
+                        progress_bar.progress((idx + 1) / len(titles_to_gen))
+                    
+                    status_msg.success("🤖 AI Content Ready. Starting Bot...")
+                    err = run_bot_flow(user_email, user_pass, gen_titles, gen_contents, status_msg, links_container)
+                    if err: st.error(err)
             except Exception as e:
-                st.error(f"Groq Error: {e}")
+                st.error(f"Gen Error: {e}")
 
 with tab2:
-    st.header("Manual Batch Post")
-    if 'rows' not in st.session_state:
-        st.session_state.rows = 1
-
+    st.header("Manual Text Post")
+    if 'rows' not in st.session_state: st.session_state.rows = 1
     def add_row(): st.session_state.rows += 1
     
-    manual_titles = []
-    manual_contents = []
-    
+    m_titles, m_contents = [], []
     for r in range(st.session_state.rows):
         with st.expander(f"Post #{r+1}", expanded=True):
-            mt = st.text_input(f"Title {r+1}", key=f"t{r}")
-            mc = st.text_area(f"Content {r+1}", key=f"c{r}", height=150)
-            manual_titles.append(mt)
-            manual_contents.append(mc)
+            m_titles.append(st.text_input(f"Title {r+1}", key=f"mt{r}"))
+            m_contents.append(st.text_area(f"Content {r+1}", key=f"mc{r}"))
             
-    st.button("➕ Add Another Post", on_click=add_row)
-    
-    if st.button("🚀 Publish Manual Posts"):
-        if not user_email or not user_pass:
-            st.error("Please provide LeetCode credentials in the sidebar.")
+    st.button("➕ Add Another", on_click=add_row)
+    if st.button("🚀 Publish Manual"):
+        if not user_email or not user_pass: st.error("Missing login info.")
         else:
-            status = st.empty()
-            valid_titles = [t for t in manual_titles if t]
-            valid_contents = [c for c in manual_contents if c]
-            
-            if len(valid_titles) != len(valid_contents):
-                st.error("Mismatch between titles and contents!")
-            else:
-                urls, err = run_bot_flow(user_email, user_pass, valid_titles, valid_contents, status)
+            v_titles = [t for t in m_titles if t]
+            v_contents = [c for c in m_contents if c]
+            with main_status:
+                s_msg = st.empty()
+                err = run_bot_flow(user_email, user_pass, v_titles, v_contents, s_msg, links_container)
                 if err: st.error(err)
-                for url in urls: st.write(url)
